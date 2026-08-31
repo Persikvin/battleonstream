@@ -588,6 +588,25 @@ function updatePawns(dt) {
         p.vx += Math.cos(flee) * ACCEL * 1.6;
         p.vy += Math.sin(flee) * ACCEL * 1.6;
       }
+
+      if (m.type === 'ashdrake' && m.jumpState === 'windup' && typeof m.jumpFX === 'number') {
+        const jd = Math.sqrt((p.x - m.jumpFX) * (p.x - m.jumpFX) + (p.y - m.jumpFY) * (p.y - m.jumpFY));
+        if (jd < 185 + p.size * 0.5) {
+          const flee = angleTo({ x: m.jumpFX, y: m.jumpFY }, p);
+          p.vx += Math.cos(flee) * ACCEL * 2.4;
+          p.vy += Math.sin(flee) * ACCEL * 2.4;
+        }
+      }
+    }
+
+    for (const mt of meteors) {
+      if (mt.phase !== 'warning') continue;
+      const md = Math.sqrt((p.x - mt.meteorX) * (p.x - mt.meteorX) + (p.y - mt.targetY) * (p.y - mt.targetY));
+      if (md < mt.radius + p.size * 0.5) {
+        const flee = angleTo({ x: mt.meteorX, y: mt.targetY }, p);
+        p.vx += Math.cos(flee) * ACCEL * 2.2;
+        p.vy += Math.sin(flee) * ACCEL * 2.2;
+      }
     }
 
     const clamped = clampVec(p.vx, p.vy, MAX_SPEED);
@@ -863,16 +882,20 @@ function updateAshdrakeAI(mob, target, dt) {
     const alive = pawns.filter(ph => ph.hp > 0);
     const dropCount = Math.min(4, Math.max(2, Math.floor(pawns.length / 3)));
     for (let i = 0; i < dropCount; i++) {
-      const p = alive.length ? alive[Math.floor(Math.random() * alive.length)] : { x: Math.random() * W, y: Math.random() * H };
+      const cx = (Math.random() * (W - 200)) + 100;
+      const cy = (Math.random() * (H - 200)) + 100;
       meteors.push({
-        x: p.x + (Math.random() - 0.5) * 140,
+        x: cx,
         y: -60,
-        targetY: p.y + Math.random() * 60,
-        vx: (Math.random() - 0.5) * 2,
+        targetY: cy,
+        meteorX: cx,
+        vx: 0,
         vy: 9 + Math.random() * 3,
         damage: 25,
         radius: 70,
         flash: 0,
+        phase: 'warning',
+        timer: 70,
       });
     }
   }
@@ -881,20 +904,21 @@ function updateAshdrakeAI(mob, target, dt) {
     mob.jumpCooldown -= dt;
     if (mob.jumpCooldown <= 0) {
       mob.jumpState = 'windup';
-      mob.jumpWindup = 35;
-      mob.jumpTarget = target && target.hp > 0 ? target : null;
+      mob.jumpWindup = 60;
+      const tp = target && target.hp > 0 ? target : null;
+      mob.jumpFX = tp ? tp.x : mob.x;
+      mob.jumpFY = tp ? tp.y : mob.y;
+      mob.jumpTarget = tp;
       mob.shadowAlpha = 0.2;
     }
   } else if (mob.jumpState === 'windup') {
     mob.jumpWindup -= dt;
-    mob.shadowAlpha = 0.2 + (1 - mob.jumpWindup / 35) * 0.6;
+    mob.shadowAlpha = 0.2 + (1 - mob.jumpWindup / 60) * 0.6;
     if (mob.jumpWindup <= 0) {
       mob.jumpState = 'leaping';
       mob.jumpStart = { x: mob.x, y: mob.y };
       mob.jumpProgress = 0;
-      mob.jumpEnd = mob.jumpTarget
-        ? { x: mob.jumpTarget.x, y: mob.jumpTarget.y }
-        : { x: mob.x, y: mob.y };
+      mob.jumpEnd = { x: mob.jumpFX, y: mob.jumpFY };
       mob.visible = false;
     }
   } else if (mob.jumpState === 'leaping') {
@@ -941,32 +965,43 @@ function updateAshdrakeAI(mob, target, dt) {
 function updateMeteors(dt) {
   for (let i = meteors.length - 1; i >= 0; i--) {
     const mt = meteors[i];
-    mt.x += mt.vx * dt;
-    mt.y += mt.vy * dt;
-    mt.flash++;
 
-    if (mt.y >= mt.targetY) {
-      let exploded = false;
-      for (let j = pawns.length - 1; j >= 0; j--) {
-        const p = pawns[j];
-        if (p.hp <= 0) continue;
-        const d = Math.sqrt((p.x - mt.x) * (p.x - mt.x) + (p.y - mt.y) * (p.y - mt.y));
-        if (d < mt.radius + p.size * 0.5) {
-          exploded = true;
-          p.hp -= mt.damage;
-          p.flashTimer = 12;
-          spawnParticles(p.x, p.y, '#ff6600', 9, 5);
-          if (p.hp <= 0) {
-            spawnParticles(p.x, p.y, p.color, 20, 5);
-            pawns.splice(j, 1);
+    if (mt.phase === 'warning') {
+      mt.timer -= dt;
+      if (mt.timer <= 0) {
+        mt.phase = 'falling';
+        mt.y = -60;
+        mt.x = mt.meteorX;
+        mt.flash = 0;
+      }
+      continue;
+    }
+
+    if (mt.phase === 'falling') {
+      mt.y += mt.vy * dt;
+      mt.flash++;
+
+      if (mt.y >= mt.targetY) {
+        for (let j = pawns.length - 1; j >= 0; j--) {
+          const p = pawns[j];
+          if (p.hp <= 0) continue;
+          const d = Math.sqrt((p.x - mt.x) * (p.x - mt.x) + (p.y - mt.y) * (p.y - mt.y));
+          if (d < mt.radius + p.size * 0.5) {
+            p.hp -= mt.damage;
+            p.flashTimer = 12;
+            p.stunTimer = STUN_FRAMES;
+            spawnParticles(p.x, p.y, '#ff6600', 9, 5);
+            if (p.hp <= 0) {
+              spawnParticles(p.x, p.y, p.color, 20, 5);
+              pawns.splice(j, 1);
+            }
           }
         }
-      }
-      if (exploded || true) {
         spawnParticles(mt.x, mt.y, '#ff4400', 18, 6);
         spawnParticles(mt.x, mt.y, '#ffaa00', 12, 4);
         meteors.splice(i, 1);
       }
+      continue;
     }
   }
 }
@@ -1222,6 +1257,23 @@ function drawMob(m) {
   ctx.save();
 
   if (m.type === 'ashdrake') {
+    if (m.jumpState === 'windup' && typeof m.jumpFX === 'number') {
+      const circX = m.jumpFX, circY = m.jumpFY;
+      const total = 60;
+      const progress = 1 - (m.jumpWindup / total);
+      const pulse = 0.5 + Math.sin(progress * Math.PI * 5) * 0.2;
+      ctx.globalAlpha = Math.max(0, pulse);
+      ctx.fillStyle = '#ff2200';
+      ctx.beginPath();
+      ctx.arc(circX, circY, 185 * Math.min(1, progress * 1.4), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = Math.max(0, pulse + 0.2);
+      ctx.strokeStyle = '#ff3333';
+      ctx.lineWidth = 2 + Math.sin(progress * Math.PI * 8) * 1;
+      ctx.beginPath();
+      ctx.arc(circX, circY, 185 * Math.min(1, progress * 1.4), 0, Math.PI * 2);
+      ctx.stroke();
+    }
     if (m.shadowAlpha > 0) {
       ctx.globalAlpha = m.shadowAlpha * 0.5;
       ctx.fillStyle = '#000000';
@@ -1283,7 +1335,43 @@ function drawMob(m) {
 
 function drawMeteor(mt) {
   ctx.save();
-  const hue = 24;
+
+  if (mt.phase === 'warning') {
+    const total = 70;
+    const progress = 1 - (mt.timer / total);
+    const pulse = 0.25 + Math.sin(progress * Math.PI * 5) * 0.15;
+
+    ctx.globalAlpha = Math.max(0, pulse);
+    ctx.fillStyle = '#ff0000';
+    ctx.beginPath();
+    ctx.arc(mt.meteorX, mt.targetY, mt.radius * Math.min(1, progress * 1.5), 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.globalAlpha = Math.max(0, pulse + 0.2);
+    ctx.strokeStyle = '#ff3333';
+    ctx.lineWidth = 2 + Math.sin(progress * Math.PI * 8) * 1;
+    ctx.beginPath();
+    ctx.arc(mt.meteorX, mt.targetY, mt.radius * Math.min(1, progress * 1.5), 0, Math.PI * 2);
+    ctx.stroke();
+
+    const ringPulse = Math.sin(progress * Math.PI * 10) * 0.5 + 0.5;
+    ctx.globalAlpha = ringPulse * 0.4;
+    ctx.strokeStyle = '#ff0000';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 6]);
+    ctx.beginPath();
+    ctx.arc(mt.meteorX, mt.targetY, mt.radius * 1.15, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = '#ffff88';
+    ctx.font = 'bold 13px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('!', mt.meteorX, mt.targetY + 6);
+    ctx.restore();
+    return;
+  }
 
   ctx.fillStyle = '#cc3300';
   ctx.beginPath();
