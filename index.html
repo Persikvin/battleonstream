@@ -49,7 +49,6 @@ const MOB_SIZE_BASE = 42;
 const HP_BAR_WIDTH = 44;
 const HP_BAR_HEIGHT = 5;
 const DODGE_DISTANCE = 140;
-const ATTACK_DIST_SWORD = 60;
 const ATTACK_DIST_BOW = 230;
 const BOW_RANGE = 300;
 const SWORD_DAMAGE = 15;
@@ -59,8 +58,6 @@ const TENTACLE_RADIUS = 65;
 const TENTACLE_DELAY_FRAMES = 60;
 const TENTACLE_STRIKE_FRAMES = 34;
 const STUN_FRAMES = 60;
-const SEPARATION_DIST = 58;
-const SEPARATION_FORCE = 0.4;
 
 const PAWN_COLORS = [
   '#FF6B6B','#4ECDC4','#45B7D1','#96CEB4','#FFEAA7',
@@ -293,7 +290,7 @@ function spawnMinivulp() {
     speed: 1.8 + Math.random() * 0.5 + wave * 0.1,
     target: null,
     attackCooldown: 0,
-    attackRange: 42,
+    attackRange: PAWN_SIZE + MOB_SIZE_BASE,
     attackDamage: 8 + wave,
     attackInterval: 55,
     sprite: minivulpSprite,
@@ -316,7 +313,7 @@ function spawnGoliath() {
     speed: 1.2 + wave * 0.05,
     target: null,
     attackCooldown: 0,
-    attackRange: 52,
+    attackRange: PAWN_SIZE + 58,
     attackDamage: 20 + wave * 2,
     attackInterval: 80,
     sprite: goliathSprite,
@@ -327,6 +324,71 @@ function spawnGoliath() {
     tentacleCooldown: 0,
     tentacles: [],
   });
+}
+
+function resolveCollisions() {
+  for (let i = 0; i < pawns.length; i++) {
+    for (let j = i + 1; j < pawns.length; j++) {
+      const a = pawns[i], b = pawns[j];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      const minD = a.size + b.size;
+      if (d < minD && d > 0.001) {
+        const overlap = (minD - d) / 2;
+        const nx = dx / d, ny = dy / d;
+        a.x -= nx * overlap;
+        a.y -= ny * overlap;
+        b.x += nx * overlap;
+        b.y += ny * overlap;
+      }
+    }
+  }
+
+  for (const p of pawns) {
+    for (const m of mobs) {
+      if (m.hp <= 0) continue;
+      const dx = m.x - p.x, dy = m.y - p.y;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      const minD = p.size + m.size;
+      if (d < minD && d > 0.001) {
+        const overlap = minD - d;
+        const nx = dx / d, ny = dy / d;
+        const mw = m.type === 'goliath' ? 0.75 : 0.6;
+        const pw = 1 - mw;
+        p.x -= nx * overlap * pw;
+        p.y -= ny * overlap * pw;
+        m.x += nx * overlap * mw;
+        m.y += ny * overlap * mw;
+      }
+    }
+  }
+
+  for (let i = 0; i < mobs.length; i++) {
+    for (let j = i + 1; j < mobs.length; j++) {
+      const a = mobs[i], b = mobs[j];
+      if (a.hp <= 0 || b.hp <= 0) continue;
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      const minD = a.size + b.size;
+      if (d < minD && d > 0.001) {
+        const overlap = (minD - d) / 2;
+        const nx = dx / d, ny = dy / d;
+        a.x -= nx * overlap;
+        a.y -= ny * overlap;
+        b.x += nx * overlap;
+        b.y += ny * overlap;
+      }
+    }
+  }
+
+  for (const p of pawns) {
+    p.x = Math.max(p.size, Math.min(W - p.size, p.x));
+    p.y = Math.max(p.size, Math.min(H - p.size, p.y));
+  }
+  for (const m of mobs) {
+    m.x = Math.max(m.size, Math.min(W - m.size, m.x));
+    m.y = Math.max(m.size, Math.min(H - m.size, m.y));
+  }
 }
 
 function updatePawns(dt) {
@@ -350,20 +412,6 @@ function updatePawns(dt) {
     if (p.attackAnim > 0) p.attackAnim -= dt;
     if (p.flashTimer > 0) p.flashTimer -= dt;
 
-    for (let j = i + 1; j < pawns.length; j++) {
-      const q = pawns[j];
-      const d = dist(p, q);
-      if (d < SEPARATION_DIST && d > 0.1) {
-        const push = SEPARATION_FORCE * (1 - d / SEPARATION_DIST);
-        const dx = (p.x - q.x) / d;
-        const dy = (p.y - q.y) / d;
-        p.vx += dx * push;
-        p.vy += dy * push;
-        q.vx -= dx * push;
-        q.vy -= dy * push;
-      }
-    }
-
     const aliveMobs = mobs.filter(m => m.hp > 0);
 
     let nearestMob = null;
@@ -381,7 +429,9 @@ function updatePawns(dt) {
       p.target = null;
     }
 
-    const atkDist = p.weaponType === 'bow' ? ATTACK_DIST_BOW : ATTACK_DIST_SWORD;
+    const atkDist = nearestMob
+      ? (p.weaponType === 'bow' ? ATTACK_DIST_BOW : (p.size + nearestMob.size + 8))
+      : Infinity;
 
     if (nearestMob && nearestDist < atkDist && p.attackCooldown <= 0) {
       p.state = 'attacking';
@@ -389,14 +439,21 @@ function updatePawns(dt) {
     } else if (nearestMob) {
       p.state = 'chase';
       const dir = angleTo(p, nearestMob);
+      const isBow = p.weaponType === 'bow';
+      const desire = isBow ? ATTACK_DIST_BOW * 0.9 : (p.size + nearestMob.size + 12);
 
-      if (p.weaponType === 'sword' && nearestDist < 32) {
-        p.vx -= Math.cos(dir) * ACCEL * 0.4;
-        p.vy -= Math.sin(dir) * ACCEL * 0.4;
-      } else if (p.weaponType === 'bow' && nearestDist < 110) {
-        p.vx -= Math.cos(dir) * ACCEL * 0.6;
-        p.vy -= Math.sin(dir) * ACCEL * 0.6;
-      } else {
+      if (isBow) {
+        if (nearestDist < desire) {
+          p.vx -= Math.cos(dir) * ACCEL * 0.5;
+          p.vy -= Math.sin(dir) * ACCEL * 0.5;
+        } else if (nearestDist > desire + 40) {
+          p.vx += Math.cos(dir) * ACCEL * 0.5;
+          p.vy += Math.sin(dir) * ACCEL * 0.5;
+        }
+      } else if (nearestDist < desire && nearestDist > desire * 0.4) {
+        p.vx -= Math.cos(dir) * ACCEL * 0.3;
+        p.vy -= Math.sin(dir) * ACCEL * 0.3;
+      } else if (nearestDist > desire) {
         p.vx += Math.cos(dir) * ACCEL;
         p.vy += Math.sin(dir) * ACCEL;
       }
@@ -454,7 +511,7 @@ function performPawnAttack(pawn, mob) {
       life: BOW_RANGE,
     });
   } else {
-    if (dist(pawn, mob) < ATTACK_DIST_SWORD) {
+    if (dist(pawn, mob) < pawn.size + mob.size + 8) {
       mob.hp -= SWORD_DAMAGE;
       mob.flashTimer = 8;
       mob.hitAnim = 10;
@@ -720,15 +777,66 @@ function drawPawn(p) {
   ctx.fillRect(barX, barY, barW * hpRatio, barH);
 
   if (p.weaponType === 'bow') {
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    const a = p.angle;
+    ctx.translate(Math.cos(a) * (s / 2), Math.sin(a) * (s / 2));
+    ctx.rotate(a);
+
     ctx.strokeStyle = '#8B4513';
-    ctx.lineWidth = 3;
+    ctx.lineWidth = 3.5;
     ctx.beginPath();
-    ctx.arc(p.x + s / 2 + 6, p.y, 9, -Math.PI * 0.7, Math.PI * 0.7);
+    ctx.arc(0, 0, 11, -Math.PI * 0.65, Math.PI * 0.65);
     ctx.stroke();
     ctx.beginPath();
-    ctx.moveTo(p.x + s / 2 + 6, p.y - 8);
-    ctx.lineTo(p.x + s / 2 + 6, p.y + 8);
+    ctx.moveTo(0, -10);
+    ctx.lineTo(0, 10);
     ctx.stroke();
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(-11, 0);
+    ctx.lineTo(-9, 0);
+    ctx.stroke();
+
+    ctx.restore();
+  } else {
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    const a = p.angle;
+    ctx.translate(Math.cos(a) * (s / 2), Math.sin(a) * (s / 2));
+    ctx.rotate(a);
+
+    ctx.strokeStyle = '#B87333';
+    ctx.lineWidth = 4;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(-3, 0);
+    ctx.lineTo(3, 0);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#C0C0C0';
+    ctx.lineWidth = 2.5;
+    ctx.lineCap = 'square';
+    ctx.beginPath();
+    ctx.moveTo(3, 0);
+    ctx.lineTo(22, 0);
+    ctx.stroke();
+
+    ctx.fillStyle = '#E0E0E0';
+    ctx.beginPath();
+    ctx.moveTo(22, 0);
+    ctx.lineTo(31, -4);
+    ctx.lineTo(33, 0);
+    ctx.lineTo(31, 4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#A0A0A0';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.restore();
   }
 
   if (p.stunTimer > 0) {
@@ -975,6 +1083,7 @@ function gameLoop(timestamp) {
   updateMobs(dt);
   updateArrows(dt);
   updateParticles(dt);
+  resolveCollisions();
 
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = '#00ff00';
