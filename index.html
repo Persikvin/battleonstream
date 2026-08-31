@@ -1,0 +1,1007 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Battle On Stream</title>
+
+<style>
+* { margin: 0; padding: 0; }
+body { overflow: hidden; background: #00ff00; }
+canvas { display: block; background: #00ff00; }
+#ui {
+  position: fixed; top: 10px; left: 10px; z-index: 10;
+  font-family: monospace; color: white; font-size: 14px;
+  text-shadow: 1px 1px 2px black, -1px -1px 2px black, 1px -1px 2px black, -1px 1px 2px black;
+  pointer-events: none;
+}
+#wave-text {
+  position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  font-family: monospace; color: white; font-size: 48px; font-weight: bold;
+  text-shadow: 2px 2px 4px black, -2px -2px 4px black;
+  pointer-events: none; opacity: 0; transition: opacity 0.5s;
+  z-index: 20;
+}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="ui">
+  <div id="viewer-count">Channel: #andrusha_wav</div>
+  <div id="pawn-count">Pawns: 0</div>
+  <div id="wave-info">Wave: 0</div>
+  <div id="kills-info">Kills: 0</div>
+</div>
+<div id="wave-text"></div>
+
+<script>
+const CHAT_CHANNEL = 'andrusha_wav';
+const MAX_PAWNS = 30;
+const MAX_MOBS_PER_WAVE = 20;
+const WAVE_INTERVAL = 15000;
+const FIRST_WAVE_DELAY = 3000;
+const ICE_FRICTION = 0.997;
+const MOB_FRICTION = 0.988;
+const ACCEL = 0.34;
+const MOB_ACCEL = 0.28;
+const MAX_SPEED = 4.5;
+const PAWN_SIZE = 52;
+const MOB_SIZE_BASE = 42;
+const HP_BAR_WIDTH = 44;
+const HP_BAR_HEIGHT = 5;
+const DODGE_DISTANCE = 140;
+const ATTACK_DIST_SWORD = 60;
+const ATTACK_DIST_BOW = 230;
+const BOW_RANGE = 300;
+const SWORD_DAMAGE = 15;
+const BOW_DAMAGE = 12;
+const ARROW_SPEED = 7;
+const TENTACLE_RADIUS = 65;
+const TENTACLE_DELAY_FRAMES = 60;
+const TENTACLE_STRIKE_FRAMES = 34;
+const STUN_FRAMES = 60;
+const SEPARATION_DIST = 58;
+const SEPARATION_FORCE = 0.4;
+
+const PAWN_COLORS = [
+  '#FF6B6B','#4ECDC4','#45B7D1','#96CEB4','#FFEAA7',
+  '#DDA0DD','#98D8C8','#F7DC6F','#BB8FCE','#85C1E9',
+  '#F1948A','#82E0AA','#F8C471','#AED6F1','#D7BDE2',
+  '#A3E4D7','#FAD7A0','#A9CCE3','#D5F5E3','#FADBD8',
+  '#E8DAEF','#D4EFDF','#FCF3CF','#D6EAF8','#F9E79F',
+  '#ABEBC6','#F5CBA7','#AEB6BF','#E6B0AA','#D5DBDB'
+];
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+let pawns = [];
+let mobs = [];
+let arrows = [];
+let particles = [];
+let wave = 0;
+let waveTimer = FIRST_WAVE_DELAY;
+let waveActive = false;
+let kills = 0;
+let tick = 0;
+let lastTime = performance.now();
+
+const IRC_URL = 'wss://irc-ws.chat.twitch.tv/irc';
+let ws = null;
+let wsRetry = 0;
+
+function connectIRC(ch) {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  try { ws = new WebSocket(IRC_URL); } catch (e) { scheduleWSReconnect(); return; }
+
+  ws.onopen = () => {
+    const nick = 'justinfan' + Math.floor(10000 + Math.random() * 89999);
+    ws.send('CAP REQ :twitch.tv/commands twitch.tv/tags');
+    ws.send('PASS SCHMOOPIIE');
+    ws.send('NICK ' + nick);
+    ws.send('USER ' + nick + ' 8 * :' + nick);
+    ws.send('JOIN #' + ch.toLowerCase());
+    wsRetry = 0;
+    console.log('[IRC] connected, joined #' + ch);
+  };
+
+  ws.onmessage = (e) => {
+    const lines = String(e.data || '').split('\r\n');
+    for (const line of lines) {
+      if (!line) continue;
+      if (line.indexOf('PING') === 0) {
+        ws.send('PONG :tmi.twitch.tv');
+        continue;
+      }
+      if (line.indexOf(' PRIVMSG ') !== -1) parseMsg(line);
+    }
+  };
+
+  ws.onerror = () => {};
+  ws.onclose = () => { scheduleWSReconnect(); };
+}
+
+function scheduleWSReconnect() {
+  const delay = Math.min(10000, 2500 + wsRetry * 1500);
+  wsRetry++;
+  setTimeout(() => connectIRC(CHAT_CHANNEL), delay);
+}
+
+function parseMsg(line) {
+  const tags = {};
+  let rest = line;
+  if (rest.charAt(0) === '@') {
+    const sp = rest.indexOf(' ');
+    if (sp !== -1) {
+      const tagPart = rest.slice(1, sp);
+      rest = rest.slice(sp + 1);
+      for (const pair of tagPart.split(';')) {
+        const i = pair.indexOf('=');
+        if (i !== -1) tags[pair.slice(0, i)] = pair.slice(i + 1);
+      }
+    }
+  }
+  const m = /^:([^!]+)![^ ]+ PRIVMSG #[^ ]+ :([\s\S]*)$/.exec(rest);
+  if (!m) return;
+  let txt = m[2];
+  if (txt.indexOf('\x01ACTION') === 0) {
+    txt = txt.replace('\x01ACTION', '').replace('\x01', '');
+  }
+  let user = tags['display-name'] || m[1];
+  if (user.indexOf('%') !== -1) { try { user = decodeURIComponent(user); } catch (e) {} }
+  spawnPawnForViewer(user, txt);
+}
+
+connectIRC(CHAT_CHANNEL);
+
+function hashString(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) - hash) + str.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
+function spawnPawnForViewer(name, message) {
+  const existing = pawns.find(p => p.name.toLowerCase() === name.toLowerCase());
+  if (existing) {
+    existing.lastMessageTime = Date.now();
+    if (message.toLowerCase().includes('sword')) existing.weaponType = 'sword';
+    else if (message.toLowerCase().includes('bow')) existing.weaponType = 'bow';
+    existing.hp = Math.min(existing.hp + 10, existing.maxHp);
+    return;
+  }
+
+  if (pawns.length >= MAX_PAWNS) {
+    const oldest = pawns.reduce((a, b) => a.lastMessageTime < b.lastMessageTime ? a : b);
+    pawns.splice(pawns.indexOf(oldest), 1);
+  }
+
+  const colorIdx = hashString(name.toLowerCase()) % PAWN_COLORS.length;
+  const spawnX = PAWN_SIZE + Math.random() * (W - PAWN_SIZE * 2);
+  const spawnY = PAWN_SIZE + Math.random() * (H - PAWN_SIZE * 2);
+  const weaponType = Math.random() < 0.4 ? 'bow' : 'sword';
+
+  pawns.push({
+    name: name.substring(0, 16),
+    color: PAWN_COLORS[colorIdx],
+    x: spawnX, y: spawnY,
+    vx: 0, vy: 0,
+    ax: 0, ay: 0,
+    hp: 100, maxHp: 100,
+    size: PAWN_SIZE,
+    weaponType,
+    lastMessageTime: Date.now(),
+    stunTimer: 0,
+    attackCooldown: 0,
+    target: null,
+    state: 'idle',
+    flashTimer: 0,
+    angle: 0,
+    attackAnim: 0,
+  });
+}
+
+const spriteCache = {};
+function loadSprite(src) {
+  if (spriteCache[src]) return spriteCache[src];
+  const img = new Image();
+  img.src = src;
+  spriteCache[src] = img;
+  return img;
+}
+
+const pawnSprite = loadSprite('sprite/zrili.png');
+const minivulpSprite = loadSprite('sprite/minivulp.png');
+const goliathSprite = loadSprite('sprite/Goliathsmol.png');
+
+function dist(a, b) {
+  const dx = a.x - b.x, dy = a.y - b.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function angleTo(a, b) {
+  return Math.atan2(b.y - a.y, b.x - a.x);
+}
+
+function clampVec(vx, vy, max) {
+  const s = Math.sqrt(vx * vx + vy * vy);
+  if (s > max) { const r = max / s; return { vx: vx * r, vy: vy * r }; }
+  return { vx, vy };
+}
+
+function spawnParticles(x, y, color, count, speed) {
+  for (let i = 0; i < count; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const sp = Math.random() * speed;
+    particles.push({
+      x, y,
+      vx: Math.cos(a) * sp,
+      vy: Math.sin(a) * sp,
+      life: 1,
+      decay: 0.02 + Math.random() * 0.03,
+      size: 2 + Math.random() * 4,
+      color
+    });
+  }
+}
+
+function showWaveText(text) {
+  const el = document.getElementById('wave-text');
+  el.textContent = text;
+  el.style.opacity = '1';
+  setTimeout(() => { el.style.opacity = '0'; }, 2000);
+}
+
+function spawnWave() {
+  wave++;
+  const minivulpCount = Math.min(3 + wave * 2, MAX_MOBS_PER_WAVE);
+  const goliathCount = wave >= 3 ? Math.floor(wave / 3) : 0;
+  showWaveText('Wave ' + wave);
+  for (let i = 0; i < minivulpCount; i++) spawnMinivulp();
+  for (let i = 0; i < goliathCount; i++) spawnGoliath();
+  waveActive = true;
+}
+
+function spawnFromEdge(margin) {
+  const side = Math.floor(Math.random() * 4);
+  switch(side) {
+    case 0: return { x: -margin, y: Math.random() * H };
+    case 1: return { x: W + margin, y: Math.random() * H };
+    case 2: return { x: Math.random() * W, y: -margin };
+    case 3: return { x: Math.random() * W, y: H + margin };
+  }
+}
+
+function spawnMinivulp() {
+  const pos = spawnFromEdge(50);
+  const hp = 40 + wave * 10;
+  mobs.push({
+    type: 'minivulp',
+    x: pos.x, y: pos.y,
+    vx: 0, vy: 0,
+    hp, maxHp: hp,
+    size: MOB_SIZE_BASE,
+    speed: 1.8 + Math.random() * 0.5 + wave * 0.1,
+    target: null,
+    attackCooldown: 0,
+    attackRange: 42,
+    attackDamage: 8 + wave,
+    attackInterval: 55,
+    sprite: minivulpSprite,
+    stunTimer: 0,
+    flashTimer: 0,
+    hitAnim: 0,
+    angle: 0,
+  });
+}
+
+function spawnGoliath() {
+  const pos = spawnFromEdge(80);
+  const hp = 150 + wave * 30;
+  mobs.push({
+    type: 'goliath',
+    x: pos.x, y: pos.y,
+    vx: 0, vy: 0,
+    hp, maxHp: hp,
+    size: 58,
+    speed: 1.2 + wave * 0.05,
+    target: null,
+    attackCooldown: 0,
+    attackRange: 52,
+    attackDamage: 20 + wave * 2,
+    attackInterval: 80,
+    sprite: goliathSprite,
+    stunTimer: 0,
+    flashTimer: 0,
+    hitAnim: 0,
+    angle: 0,
+    tentacleCooldown: 0,
+    tentacles: [],
+  });
+}
+
+function updatePawns(dt) {
+  for (let i = 0; i < pawns.length; i++) {
+    const p = pawns[i];
+
+    if (p.stunTimer > 0) {
+      p.stunTimer -= dt;
+      p.vx *= 0.92;
+      p.vy *= 0.92;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vx *= ICE_FRICTION;
+      p.vy *= ICE_FRICTION;
+      p.x = Math.max(p.size, Math.min(W - p.size, p.x));
+      p.y = Math.max(p.size, Math.min(H - p.size, p.y));
+      continue;
+    }
+
+    if (p.attackCooldown > 0) p.attackCooldown -= dt;
+    if (p.attackAnim > 0) p.attackAnim -= dt;
+    if (p.flashTimer > 0) p.flashTimer -= dt;
+
+    for (let j = i + 1; j < pawns.length; j++) {
+      const q = pawns[j];
+      const d = dist(p, q);
+      if (d < SEPARATION_DIST && d > 0.1) {
+        const push = SEPARATION_FORCE * (1 - d / SEPARATION_DIST);
+        const dx = (p.x - q.x) / d;
+        const dy = (p.y - q.y) / d;
+        p.vx += dx * push;
+        p.vy += dy * push;
+        q.vx -= dx * push;
+        q.vy -= dy * push;
+      }
+    }
+
+    const aliveMobs = mobs.filter(m => m.hp > 0);
+
+    let nearestMob = null;
+    let nearestDist = Infinity;
+    for (const m of aliveMobs) {
+      const d = dist(p, m);
+      if (d < nearestDist) { nearestDist = d; nearestMob = m; }
+    }
+
+    if (nearestMob) {
+      p.target = nearestMob;
+      p.angle = angleTo(p, nearestMob);
+    } else {
+      p.state = 'idle';
+      p.target = null;
+    }
+
+    const atkDist = p.weaponType === 'bow' ? ATTACK_DIST_BOW : ATTACK_DIST_SWORD;
+
+    if (nearestMob && nearestDist < atkDist && p.attackCooldown <= 0) {
+      p.state = 'attacking';
+      performPawnAttack(p, nearestMob);
+    } else if (nearestMob) {
+      p.state = 'chase';
+      const dir = angleTo(p, nearestMob);
+
+      if (p.weaponType === 'sword' && nearestDist < 32) {
+        p.vx -= Math.cos(dir) * ACCEL * 0.4;
+        p.vy -= Math.sin(dir) * ACCEL * 0.4;
+      } else if (p.weaponType === 'bow' && nearestDist < 110) {
+        p.vx -= Math.cos(dir) * ACCEL * 0.6;
+        p.vy -= Math.sin(dir) * ACCEL * 0.6;
+      } else {
+        p.vx += Math.cos(dir) * ACCEL;
+        p.vy += Math.sin(dir) * ACCEL;
+      }
+    }
+
+    for (const m of aliveMobs) {
+      if (m.type === 'goliath') {
+        for (const t of m.tentacles) {
+          if (t.phase === 'warning') {
+            const td = dist(p, { x: t.x, y: t.y });
+            if (td < TENTACLE_RADIUS + p.size) {
+              const flee = angleTo({ x: t.x, y: t.y }, p);
+              p.vx += Math.cos(flee) * ACCEL * 2.2;
+              p.vy += Math.sin(flee) * ACCEL * 2.2;
+            }
+          }
+        }
+      }
+      const md = dist(p, m);
+      if (md < DODGE_DISTANCE && m.target === p && m.attackCooldown < 20) {
+        const flee = angleTo(m, p);
+        p.vx += Math.cos(flee) * ACCEL * 1.6;
+        p.vy += Math.sin(flee) * ACCEL * 1.6;
+      }
+    }
+
+    const clamped = clampVec(p.vx, p.vy, MAX_SPEED);
+    p.vx = clamped.vx;
+    p.vy = clamped.vy;
+
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+
+    p.vx *= ICE_FRICTION;
+    p.vy *= ICE_FRICTION;
+
+    if (p.x < p.size) { p.x = p.size; p.vx = Math.abs(p.vx) * 0.4; }
+    if (p.x > W - p.size) { p.x = W - p.size; p.vx = -Math.abs(p.vx) * 0.4; }
+    if (p.y < p.size) { p.y = p.size; p.vy = Math.abs(p.vy) * 0.4; }
+    if (p.y > H - p.size) { p.y = H - p.size; p.vy = -Math.abs(p.vy) * 0.4; }
+  }
+}
+
+function performPawnAttack(pawn, mob) {
+  pawn.attackCooldown = pawn.weaponType === 'bow' ? 80 : 45;
+  pawn.attackAnim = 18;
+
+  if (pawn.weaponType === 'bow') {
+    const angle = angleTo(pawn, mob);
+    arrows.push({
+      x: pawn.x, y: pawn.y,
+      vx: Math.cos(angle) * ARROW_SPEED,
+      vy: Math.sin(angle) * ARROW_SPEED,
+      damage: BOW_DAMAGE,
+      life: BOW_RANGE,
+    });
+  } else {
+    if (dist(pawn, mob) < ATTACK_DIST_SWORD) {
+      mob.hp -= SWORD_DAMAGE;
+      mob.flashTimer = 8;
+      mob.hitAnim = 10;
+      spawnParticles(mob.x, mob.y, '#ffffff', 5, 3);
+    }
+  }
+}
+
+function updateMobs(dt) {
+  for (let i = mobs.length - 1; i >= 0; i--) {
+    const m = mobs[i];
+
+    if (m.hp <= 0) {
+      spawnParticles(m.x, m.y, '#FF4444', 15, 5);
+      kills++;
+      mobs.splice(i, 1);
+      continue;
+    }
+
+    if (m.stunTimer > 0) {
+      m.stunTimer -= dt;
+      m.vx *= 0.8;
+      m.vy *= 0.8;
+      m.x += m.vx * dt;
+      m.y += m.vy * dt;
+      m.vx *= MOB_FRICTION;
+      m.vy *= MOB_FRICTION;
+      m.x = Math.max(m.size, Math.min(W - m.size, m.x));
+      m.y = Math.max(m.size, Math.min(H - m.size, m.y));
+      continue;
+    }
+
+    if (m.attackCooldown > 0) m.attackCooldown -= dt;
+    if (m.flashTimer > 0) m.flashTimer -= dt;
+    if (m.hitAnim > 0) m.hitAnim -= dt;
+
+    const alivePawns = pawns.filter(p => p.hp > 0);
+    if (alivePawns.length === 0) continue;
+
+    let nearestPawn = null;
+    let nearestDist = Infinity;
+    for (const p of alivePawns) {
+      const d = dist(m, p);
+      if (d < nearestDist) { nearestDist = d; nearestPawn = p; }
+    }
+    if (!nearestPawn) continue;
+
+    m.target = nearestPawn;
+    m.angle = angleTo(m, nearestPawn);
+
+    if (m.type === 'minivulp') {
+      updateMinivulpAI(m, nearestPawn, nearestDist, dt);
+    } else if (m.type === 'goliath') {
+      updateGoliathAI(m, nearestPawn, nearestDist, dt, alivePawns);
+    }
+
+    const clamped = clampVec(m.vx, m.vy, m.speed * 3);
+    m.vx = clamped.vx;
+    m.vy = clamped.vy;
+
+    m.x += m.vx * dt;
+    m.y += m.vy * dt;
+
+    m.vx *= MOB_FRICTION;
+    m.vy *= MOB_FRICTION;
+
+    m.x = Math.max(m.size, Math.min(W - m.size, m.x));
+    m.y = Math.max(m.size, Math.min(H - m.size, m.y));
+  }
+
+  if (waveActive && mobs.length === 0 && wave > 0) {
+    waveActive = false;
+    waveTimer = WAVE_INTERVAL;
+    showWaveText('Wave Clear!');
+  }
+}
+
+function updateMinivulpAI(mob, target, distance, dt) {
+  if (distance < mob.attackRange && mob.attackCooldown <= 0) {
+    mob.attackCooldown = mob.attackInterval;
+    mob.hitAnim = 10;
+    target.hp -= mob.attackDamage;
+    target.flashTimer = 10;
+    spawnParticles(target.x, target.y, '#FF0000', 8, 3);
+    if (target.hp <= 0) {
+      spawnParticles(target.x, target.y, target.color, 20, 5);
+      const idx = pawns.indexOf(target);
+      if (idx >= 0) pawns.splice(idx, 1);
+    }
+  } else {
+    const dir = angleTo(mob, target);
+    mob.vx += Math.cos(dir) * MOB_ACCEL;
+    mob.vy += Math.sin(dir) * MOB_ACCEL;
+  }
+}
+
+function updateGoliathAI(mob, target, distance, dt, alivePawns) {
+  if (mob.tentacles.length > 0) {
+    updateTentacles(mob, dt);
+    if (mob.tentacles.length > 0) return;
+  }
+
+  if (mob.tentacleCooldown > 0) mob.tentacleCooldown -= dt;
+
+  if (mob.tentacleCooldown <= 0 && distance < 380 && Math.random() < 0.015) {
+    mob.tentacleCooldown = 200;
+
+    const shuffled = [...alivePawns].sort(() => Math.random() - 0.5);
+    const targets = [];
+    for (let j = 0; j < Math.min(3, shuffled.length); j++) {
+      targets.push({ x: shuffled[j].x, y: shuffled[j].y });
+    }
+    while (targets.length < 3) {
+      targets.push({
+        x: mob.x + (Math.random() - 0.5) * 400,
+        y: mob.y + (Math.random() - 0.5) * 400
+      });
+    }
+
+    for (let j = 0; j < 3; j++) {
+      mob.tentacles.push({
+        x: targets[j].x,
+        y: targets[j].y,
+        radius: TENTACLE_RADIUS,
+        phase: 'warning',
+        timer: TENTACLE_DELAY_FRAMES,
+        hitPawns: new Set(),
+        animProgress: 0,
+      });
+    }
+  }
+
+  if (distance < mob.attackRange && mob.attackCooldown <= 0) {
+    mob.attackCooldown = mob.attackInterval;
+    mob.hitAnim = 15;
+    target.hp -= mob.attackDamage;
+    target.flashTimer = 10;
+    spawnParticles(target.x, target.y, '#FF4400', 10, 4);
+    if (target.hp <= 0) {
+      spawnParticles(target.x, target.y, target.color, 20, 5);
+      const idx = pawns.indexOf(target);
+      if (idx >= 0) pawns.splice(idx, 1);
+    }
+  } else {
+    const dir = angleTo(mob, target);
+    mob.vx += Math.cos(dir) * MOB_ACCEL * 0.7;
+    mob.vy += Math.sin(dir) * MOB_ACCEL * 0.7;
+  }
+}
+
+function updateTentacles(mob, dt) {
+  for (let i = mob.tentacles.length - 1; i >= 0; i--) {
+    const t = mob.tentacles[i];
+    t.timer -= dt;
+
+    if (t.phase === 'warning' && t.timer <= 0) {
+      t.phase = 'strike';
+      t.timer = TENTACLE_STRIKE_FRAMES;
+      t.animProgress = 0;
+    }
+
+    if (t.phase === 'strike') {
+      t.animProgress = Math.min(1, t.animProgress + dt * 0.12);
+
+      if (t.animProgress > 0.3) {
+        const alivePawns = pawns.filter(p => p.hp > 0);
+        for (const p of alivePawns) {
+          if (t.hitPawns.has(p)) continue;
+          const d = dist(p, t);
+          if (d < t.radius) {
+            t.hitPawns.add(p);
+            p.hp -= 10;
+            p.stunTimer = STUN_FRAMES;
+            p.flashTimer = 15;
+            spawnParticles(p.x, p.y, '#FF0000', 10, 4);
+            if (p.hp <= 0) {
+              spawnParticles(p.x, p.y, p.color, 20, 5);
+              const idx = pawns.indexOf(p);
+              if (idx >= 0) pawns.splice(idx, 1);
+            }
+          }
+        }
+      }
+
+      if (t.timer <= 0) t.phase = 'done';
+    }
+
+    if (t.phase === 'done') mob.tentacles.splice(i, 1);
+  }
+}
+
+function updateArrows(dt) {
+  for (let i = arrows.length - 1; i >= 0; i--) {
+    const a = arrows[i];
+    a.x += a.vx * dt;
+    a.y += a.vy * dt;
+    a.life -= Math.sqrt(a.vx * a.vx + a.vy * a.vy) * dt;
+
+    if (a.x < -50 || a.x > W + 50 || a.y < -50 || a.y > H + 50 || a.life <= 0) {
+      arrows.splice(i, 1);
+      continue;
+    }
+
+    for (let j = mobs.length - 1; j >= 0; j--) {
+      const m = mobs[j];
+      if (m.hp <= 0) continue;
+      if (dist(a, m) < m.size) {
+        m.hp -= a.damage;
+        m.flashTimer = 8;
+        m.hitAnim = 10;
+        spawnParticles(m.x, m.y, '#ffffff', 5, 3);
+        arrows.splice(i, 1);
+        break;
+      }
+    }
+  }
+}
+
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vx *= 0.95;
+    p.vy *= 0.95;
+    p.life -= p.decay * dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+function drawPawn(p) {
+  ctx.save();
+
+  if (p.flashTimer > 0 && Math.floor(p.flashTimer) % 2 === 0) ctx.globalAlpha = 0.5;
+  if (p.stunTimer > 0 && Math.floor(p.stunTimer / 4) % 2 === 0) ctx.globalAlpha = 0.35;
+
+  const s = p.size;
+  ctx.drawImage(pawnSprite, p.x - s / 2, p.y - s / 2, s, s);
+
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = p.color;
+  ctx.globalAlpha = 0.15;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, s / 2 + 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  ctx.font = 'bold 13px Arial';
+  ctx.textAlign = 'center';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = 'rgba(0,0,0,0.9)';
+  ctx.strokeText(p.name, p.x, p.y - s / 2 - 12);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(p.name, p.x, p.y - s / 2 - 12);
+
+  const hpRatio = Math.max(0, p.hp / p.maxHp);
+  const barW = HP_BAR_WIDTH, barH = HP_BAR_HEIGHT;
+  const barX = p.x - barW / 2, barY = p.y + s / 2 + 4;
+  ctx.fillStyle = '#333';
+  ctx.fillRect(barX - 1, barY - 1, barW + 2, barH + 2);
+  ctx.fillStyle = hpRatio > 0.6 ? '#00ff00' : hpRatio > 0.3 ? '#ffaa00' : '#ff0000';
+  ctx.fillRect(barX, barY, barW * hpRatio, barH);
+
+  if (p.weaponType === 'bow') {
+    ctx.strokeStyle = '#8B4513';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(p.x + s / 2 + 6, p.y, 9, -Math.PI * 0.7, Math.PI * 0.7);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(p.x + s / 2 + 6, p.y - 8);
+    ctx.lineTo(p.x + s / 2 + 6, p.y + 8);
+    ctx.stroke();
+  }
+
+  if (p.stunTimer > 0) {
+    ctx.fillStyle = '#FFD700';
+    ctx.font = 'bold 18px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('\u26A1', p.x, p.y - s / 2 - 26);
+  }
+
+  ctx.restore();
+}
+
+function drawMob(m) {
+  ctx.save();
+  if (m.flashTimer > 0 && Math.floor(m.flashTimer) % 2 === 0) ctx.globalAlpha = 0.5;
+  if (m.stunTimer > 0) ctx.globalAlpha = 0.4;
+
+  const s = m.size;
+  ctx.save();
+  ctx.translate(m.x, m.y);
+  if (m.hitAnim > 0) ctx.translate(Math.sin(m.hitAnim * 5) * 2, 0);
+  ctx.drawImage(m.sprite, -s / 2, -s / 2, s, s);
+  ctx.restore();
+  ctx.globalAlpha = 1;
+
+  const hpRatio = Math.max(0, m.hp / m.maxHp);
+  const barW = s * 1.2, barH = 4;
+  const barX = m.x - barW / 2, barY = m.y + s / 2 + 4;
+  ctx.fillStyle = '#333';
+  ctx.fillRect(barX - 1, barY - 1, barW + 2, barH + 2);
+  ctx.fillStyle = hpRatio > 0.6 ? '#ff4444' : hpRatio > 0.3 ? '#ff0000' : '#aa0000';
+  ctx.fillRect(barX, barY, barW * hpRatio, barH);
+
+  if (m.type === 'goliath') {
+    ctx.font = 'bold 12px Arial';
+    ctx.textAlign = 'center';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = 'rgba(0,0,0,0.9)';
+    ctx.strokeText('GOLIATH', m.x, m.y - s / 2 - 8);
+    ctx.fillStyle = '#ff6666';
+    ctx.fillText('GOLIATH', m.x, m.y - s / 2 - 8);
+  }
+
+  ctx.restore();
+}
+
+function drawTentacles(mob) {
+  for (const t of mob.tentacles) {
+    ctx.save();
+
+    if (t.phase === 'warning') {
+      const progress = 1 - (t.timer / TENTACLE_DELAY_FRAMES);
+      const pulse = 0.25 + Math.sin(progress * Math.PI * 5) * 0.15;
+
+      ctx.globalAlpha = pulse;
+      ctx.fillStyle = '#ff0000';
+      ctx.beginPath();
+      ctx.arc(t.x, t.y, t.radius * Math.min(1, progress * 1.5), 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.globalAlpha = pulse + 0.2;
+      ctx.strokeStyle = '#ff3333';
+      ctx.lineWidth = 2 + Math.sin(progress * Math.PI * 8) * 1;
+      ctx.beginPath();
+      ctx.arc(t.x, t.y, t.radius * Math.min(1, progress * 1.5), 0, Math.PI * 2);
+      ctx.stroke();
+
+      const dots = 10;
+      for (let i = 0; i < dots; i++) {
+        const angle = (i / dots) * Math.PI * 2 + progress * 6;
+        const r = t.radius * Math.min(1, progress * 1.5) * (0.4 + Math.sin(progress * Math.PI * 3 + i) * 0.2);
+        ctx.globalAlpha = pulse + 0.3;
+        ctx.fillStyle = i % 2 === 0 ? '#ff2222' : '#ff6666';
+        ctx.beginPath();
+        ctx.arc(t.x + Math.cos(angle) * r, t.y + Math.sin(angle) * r, 3 + progress * 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      const ringPulse = Math.sin(progress * Math.PI * 10) * 0.5 + 0.5;
+      ctx.globalAlpha = ringPulse * 0.4;
+      ctx.strokeStyle = '#ff0000';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 6]);
+      ctx.beginPath();
+      ctx.arc(t.x, t.y, t.radius * 1.2, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    if (t.phase === 'strike') {
+      const p = t.animProgress;
+
+      ctx.globalAlpha = 0.8;
+      ctx.fillStyle = '#880000';
+      ctx.beginPath();
+      ctx.arc(t.x, t.y, t.radius * 0.9 * p, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.globalAlpha = 0.4 + p * 0.4;
+      ctx.fillStyle = '#cc0000';
+      ctx.beginPath();
+      ctx.arc(t.x, t.y, t.radius * 0.5 * p, 0, Math.PI * 2);
+      ctx.fill();
+
+      const tentCount = 6;
+      const toMob = Math.atan2(mob.y - t.y, mob.x - t.x);
+
+      for (let i = 0; i < tentCount; i++) {
+        const spread = ((i - (tentCount - 1) / 2) / tentCount) * Math.PI * 0.8;
+        const angle = toMob + spread;
+        const len = p * 35 + Math.sin(p * Math.PI * 4 + i * 1.3) * 12;
+
+        ctx.strokeStyle = '#aa0000';
+        ctx.lineWidth = 4 - p * 1;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(t.x, t.y);
+        const segs = 6;
+        let cx = t.x, cy = t.y;
+        for (let s = 1; s <= segs; s++) {
+          const t2 = s / segs;
+          const wobble = Math.sin(t2 * Math.PI * 3 + p * 8 + i * 2) * 10 * p * (1 - t2 * 0.3);
+          cx = t.x + Math.cos(angle) * len * t2 + Math.cos(angle + Math.PI / 2) * wobble;
+          cy = t.y + Math.sin(angle) * len * t2 + Math.sin(angle + Math.PI / 2) * wobble;
+          ctx.lineTo(cx, cy);
+        }
+        ctx.stroke();
+
+        if (p > 0.4) {
+          const tipWobble = Math.sin(p * 10 + i) * 4;
+          ctx.fillStyle = '#ff3300';
+          ctx.beginPath();
+          ctx.arc(cx + tipWobble, cy, 2 + p * 2, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      ctx.globalAlpha = 0.2 + Math.sin(p * Math.PI * 8) * 0.15;
+      ctx.fillStyle = '#ff0000';
+      ctx.beginPath();
+      ctx.arc(t.x, t.y, t.radius * (0.2 + p * 0.6), 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.globalAlpha = 0.5;
+      ctx.strokeStyle = '#ff0000';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.arc(t.x, t.y, t.radius, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    ctx.restore();
+  }
+}
+
+function drawArrow(a) {
+  ctx.save();
+  ctx.translate(a.x, a.y);
+  ctx.rotate(Math.atan2(a.vy, a.vx));
+  ctx.fillStyle = '#8B4513';
+  ctx.fillRect(-8, -1, 16, 2);
+  ctx.fillStyle = '#C0C0C0';
+  ctx.beginPath();
+  ctx.moveTo(8, 0);
+  ctx.lineTo(5, -3);
+  ctx.lineTo(5, 3);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawSwordSlash(p) {
+  if (p.attackAnim <= 0 || p.weaponType !== 'sword') return;
+  ctx.save();
+  const prog = 1 - p.attackAnim / 18;
+  const a = p.angle;
+  const r = p.size * 1.3;
+
+  ctx.globalAlpha = 0.6 * (1 - prog);
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, r * (0.4 + prog * 0.6), a - Math.PI / 3, a + Math.PI / 3);
+  ctx.stroke();
+
+  ctx.globalAlpha = 0.25 * (1 - prog);
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.moveTo(p.x, p.y);
+  ctx.arc(p.x, p.y, r * (0.4 + prog * 0.6), a - Math.PI / 3, a + Math.PI / 3);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    ctx.save();
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawGrid() {
+  ctx.strokeStyle = 'rgba(0, 180, 0, 0.12)';
+  ctx.lineWidth = 1;
+  const g = 80;
+  for (let x = 0; x < W; x += g) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, H);
+    ctx.stroke();
+  }
+  for (let y = 0; y < H; y += g) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(W, y);
+    ctx.stroke();
+  }
+}
+
+function gameLoop(timestamp) {
+  const delta = timestamp - lastTime;
+  const rawDt = delta / 16.67;
+  const dt = Math.min(rawDt, 3);
+  lastTime = timestamp;
+  tick++;
+
+  if (!waveActive) {
+    waveTimer -= delta;
+    if (waveTimer <= 0 && pawns.length > 0) {
+      spawnWave();
+    }
+  }
+
+  updatePawns(dt);
+  updateMobs(dt);
+  updateArrows(dt);
+  updateParticles(dt);
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#00ff00';
+  ctx.fillRect(0, 0, W, H);
+
+  drawGrid();
+
+  for (const m of mobs) {
+    if (m.tentacles && m.tentacles.length > 0) drawTentacles(m);
+  }
+
+  for (const a of arrows) drawArrow(a);
+  for (const p of pawns) { drawPawn(p); drawSwordSlash(p); }
+  for (const m of mobs) drawMob(m);
+  drawParticles();
+
+  document.getElementById('pawn-count').textContent = 'Pawns: ' + pawns.length;
+  document.getElementById('wave-info').textContent = 'Wave: ' + wave + ' | Mobs: ' + mobs.length;
+  document.getElementById('kills-info').textContent = 'Kills: ' + kills;
+
+  requestAnimationFrame(gameLoop);
+}
+
+requestAnimationFrame(gameLoop);
+
+spawnPawnForViewer('TestPawn_Sword', 'sword');
+spawnPawnForViewer('TestPawn_Bow', 'bow');
+</script>
+</body>
+</html>
