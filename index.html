@@ -612,13 +612,14 @@ function performPawnAttack(pawn, mob) {
     const baseAngle = angleTo(pawn, mob);
 
     if (pawn.multishot) {
+      const dmg = BOW_DAMAGE * 2;
       for (let i = -1; i <= 1; i++) {
         const a = baseAngle + i * 0.16;
         arrows.push({
           x: pawn.x, y: pawn.y,
           vx: Math.cos(a) * speed,
           vy: Math.sin(a) * speed,
-          damage: BOW_DAMAGE,
+          damage: dmg,
           life: range,
         });
       }
@@ -716,7 +717,7 @@ function updateMobs(dt) {
     waveTimer = WAVE_INTERVAL;
 
     for (const p of pawns) {
-      p.hp = Math.min(p.hp + 30, p.maxHp);
+      p.hp = p.maxHp;
       p.wavesSurvived = (p.wavesSurvived || 0) + 1;
       spawnParticles(p.x, p.y, '#00ff88', 6, 2);
 
