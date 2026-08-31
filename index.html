@@ -84,6 +84,7 @@ let pawns = [];
 let mobs = [];
 let arrows = [];
 let particles = [];
+let meteors = [];
 let wave = 0;
 let waveTimer = FIRST_WAVE_DELAY;
 let waveActive = false;
@@ -172,8 +173,8 @@ function spawnPawnForViewer(name, message) {
   const existing = pawns.find(p => p.name.toLowerCase() === name.toLowerCase());
   if (existing) {
     existing.lastMessageTime = Date.now();
-    if (message.toLowerCase().includes('sword')) existing.weaponType = 'sword';
-    else if (message.toLowerCase().includes('bow')) existing.weaponType = 'bow';
+    const cmd = wepFromMessage(message);
+    if (cmd) setPawnWeapon(existing, cmd);
     existing.hp = Math.min(existing.hp + 10, existing.maxHp);
     return;
   }
@@ -186,7 +187,7 @@ function spawnPawnForViewer(name, message) {
   const colorIdx = hashString(name.toLowerCase()) % PAWN_COLORS.length;
   const spawnX = PAWN_SIZE + Math.random() * (W - PAWN_SIZE * 2);
   const spawnY = PAWN_SIZE + Math.random() * (H - PAWN_SIZE * 2);
-  const weaponType = Math.random() < 0.4 ? 'bow' : 'sword';
+  const weaponType = wepFromMessage(message) || (Math.random() < 0.4 ? 'bow' : 'sword');
 
   pawns.push({
     name: name.substring(0, 16),
@@ -196,6 +197,7 @@ function spawnPawnForViewer(name, message) {
     ax: 0, ay: 0,
     hp: 100, maxHp: 100,
     size: PAWN_SIZE,
+    baseSize: PAWN_SIZE,
     weaponType,
     lastMessageTime: Date.now(),
     stunTimer: 0,
@@ -205,7 +207,31 @@ function spawnPawnForViewer(name, message) {
     flashTimer: 0,
     angle: 0,
     attackAnim: 0,
+    wavesSurvived: 0,
+    level: 0,
   });
+}
+
+function wepFromMessage(message) {
+  const m = (message || '').toLowerCase();
+  if (m.includes('!bow') || m.includes('!лук') || m.includes('лучник')) return 'bow';
+  if (m.includes('!sword') || m.includes('!меч') || m.includes('мечник')) return 'sword';
+  return null;
+}
+
+function setPawnWeapon(p, type) {
+  p.weaponType = type;
+  if (type === 'bow') {
+    p.areaHit = false;
+    p.fastShot = p.level >= 1;
+    p.multishot = p.level >= 2;
+    p.size = p.baseSize;
+  } else {
+    p.fastShot = false;
+    p.multishot = false;
+    p.areaHit = p.level >= 2;
+    p.size = p.baseSize * (p.level >= 2 ? 1.3 : p.level >= 1 ? 1.15 : 1);
+  }
 }
 
 const spriteCache = {};
@@ -220,6 +246,7 @@ function loadSprite(src) {
 const pawnSprite = loadSprite('sprite/zrili.png');
 const minivulpSprite = loadSprite('sprite/minivulp.png');
 const goliathSprite = loadSprite('sprite/Goliathsmol.png');
+const ashdrakeSprite = loadSprite('sprite/Ashdrake.png');
 
 function dist(a, b) {
   const dx = a.x - b.x, dy = a.y - b.y;
@@ -234,6 +261,25 @@ function clampVec(vx, vy, max) {
   const s = Math.sqrt(vx * vx + vy * vy);
   if (s > max) { const r = max / s; return { vx: vx * r, vy: vy * r }; }
   return { vx, vy };
+}
+
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+function drawStar(ctx, cx, cy, points, outerR, innerR) {
+  ctx.beginPath();
+  for (let i = 0; i < points * 2; i++) {
+    const r = i % 2 === 0 ? outerR : innerR;
+    const a = (i / (points * 2)) * Math.PI * 2 - Math.PI / 2;
+    const x = cx + Math.cos(a) * r;
+    const y = cy + Math.sin(a) * r;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
 }
 
 function spawnParticles(x, y, color, count, speed) {
@@ -262,6 +308,13 @@ function showWaveText(text) {
 function spawnWave() {
   wave++;
   const friendlyCount = pawns.length;
+
+  if (wave % 10 === 0) {
+    spawnAshdrake();
+    showWaveText('Wave ' + wave + ' - BOSS!');
+    waveActive = true;
+    return;
+  }
 
   const totalMobs = Math.min(Math.max(4, friendlyCount + (1 + Math.floor(Math.random() * 3))), MAX_MOBS_PER_WAVE);
 
@@ -339,6 +392,38 @@ function spawnGoliath() {
     tentacles: [],
     behavior: Math.random() < 0.4 ? 'flank' : 'direct',
     orbitAngle: Math.random() * Math.PI * 2,
+  });
+}
+
+function spawnAshdrake() {
+  const hp = Math.max(900, 600 + pawns.length * 40);
+  mobs.push({
+    type: 'ashdrake',
+    x: W / 2, y: H / 2,
+    vx: 0, vy: 0,
+    hp, maxHp: hp,
+    size: 130,
+    speed: 0,
+    target: null,
+    attackCooldown: 0,
+    attackRange: 99999,
+    attackDamage: 0,
+    attackInterval: 99999,
+    sprite: ashdrakeSprite,
+    stunTimer: 0,
+    flashTimer: 0,
+    hitAnim: 0,
+    angle: 0,
+    meteorCooldown: 0,
+    meteorInterval: 90,
+    jumpState: 'idle',
+    jumpCooldown: 0,
+    jumpInterval: 240,
+    jumpStart: null,
+    jumpTarget: null,
+    jumpProgress: 0,
+    jumpDuration: 50,
+    shadowAlpha: 0,
   });
 }
 
@@ -445,8 +530,11 @@ function updatePawns(dt) {
       p.target = null;
     }
 
+    const isBow = p.weaponType === 'bow';
     const atkDist = nearestMob
-      ? (p.weaponType === 'bow' ? ATTACK_DIST_BOW : ((p.size + nearestMob.size) * COLLIDE_SCALE) + 8)
+      ? (isBow
+          ? (p.fastShot ? ATTACK_DIST_BOW * 1.5 : ATTACK_DIST_BOW)
+          : ((p.size + nearestMob.size) * COLLIDE_SCALE) + (p.areaHit ? 45 : 8))
       : Infinity;
 
     if (nearestMob && nearestDist < atkDist && p.attackCooldown <= 0) {
@@ -455,8 +543,9 @@ function updatePawns(dt) {
     } else if (nearestMob) {
       p.state = 'chase';
       const dir = angleTo(p, nearestMob);
-      const isBow = p.weaponType === 'bow';
-      const desire = isBow ? ATTACK_DIST_BOW * 0.9 : ((p.size + nearestMob.size) * COLLIDE_SCALE) + 12;
+      const desire = isBow
+        ? (p.fastShot ? ATTACK_DIST_BOW * 0.6 : ATTACK_DIST_BOW * 0.9)
+        : ((p.size + nearestMob.size) * COLLIDE_SCALE) + (p.areaHit ? 25 : 12);
 
       if (isBow) {
         if (nearestDist < desire) {
@@ -518,20 +607,42 @@ function performPawnAttack(pawn, mob) {
   pawn.attackAnim = 18;
 
   if (pawn.weaponType === 'bow') {
-    const angle = angleTo(pawn, mob);
-    arrows.push({
-      x: pawn.x, y: pawn.y,
-      vx: Math.cos(angle) * ARROW_SPEED,
-      vy: Math.sin(angle) * ARROW_SPEED,
-      damage: BOW_DAMAGE,
-      life: BOW_RANGE,
-    });
+    const speed = pawn.fastShot ? ARROW_SPEED * 1.7 : ARROW_SPEED;
+    const range = pawn.fastShot ? BOW_RANGE * 1.6 : BOW_RANGE;
+    const baseAngle = angleTo(pawn, mob);
+
+    if (pawn.multishot) {
+      for (let i = -1; i <= 1; i++) {
+        const a = baseAngle + i * 0.16;
+        arrows.push({
+          x: pawn.x, y: pawn.y,
+          vx: Math.cos(a) * speed,
+          vy: Math.sin(a) * speed,
+          damage: BOW_DAMAGE,
+          life: range,
+        });
+      }
+    } else {
+      arrows.push({
+        x: pawn.x, y: pawn.y,
+        vx: Math.cos(baseAngle) * speed,
+        vy: Math.sin(baseAngle) * speed,
+        damage: BOW_DAMAGE,
+        life: range,
+      });
+    }
   } else {
-    if (dist(pawn, mob) < ((pawn.size + mob.size) * COLLIDE_SCALE) + 8) {
-      mob.hp -= SWORD_DAMAGE;
-      mob.flashTimer = 8;
-      mob.hitAnim = 10;
-      spawnParticles(mob.x, mob.y, '#ffffff', 5, 3);
+    const baseRange = ((pawn.size + mob.size) * COLLIDE_SCALE) + 8;
+    const range = pawn.areaHit ? baseRange + 40 : baseRange;
+
+    const targets = pawn.areaHit ? mobs.filter(mm => mm.hp > 0) : [mob];
+    for (const tm of targets) {
+      if (dist(pawn, tm) < range) {
+        tm.hp -= SWORD_DAMAGE;
+        tm.flashTimer = 8;
+        tm.hitAnim = 10;
+        spawnParticles(tm.x, tm.y, '#ffffff', 5, 3);
+      }
     }
   }
 }
@@ -582,6 +693,8 @@ function updateMobs(dt) {
       updateMinivulpAI(m, nearestPawn, nearestDist, dt);
     } else if (m.type === 'goliath') {
       updateGoliathAI(m, nearestPawn, nearestDist, dt, alivePawns);
+    } else if (m.type === 'ashdrake') {
+      updateAshdrakeAI(m, nearestPawn, dt);
     }
 
     const clamped = clampVec(m.vx, m.vy, m.speed * 3);
@@ -604,10 +717,49 @@ function updateMobs(dt) {
 
     for (const p of pawns) {
       p.hp = Math.min(p.hp + 30, p.maxHp);
+      p.wavesSurvived = (p.wavesSurvived || 0) + 1;
       spawnParticles(p.x, p.y, '#00ff88', 6, 2);
+
+      const newLevel = pawnLevelFromWaves(p.wavesSurvived);
+      if (newLevel > (p.level || 0)) {
+        p.level = newLevel;
+        applyUpgrade(p);
+        spawnParticles(p.x, p.y, '#ffd700', 16, 4);
+      }
     }
 
     showWaveText('Wave Clear!');
+  }
+}
+
+function pawnLevelFromWaves(waves) {
+  if (waves >= 6) return 2;
+  if (waves >= 3) return 1;
+  return 0;
+}
+
+function applyUpgrade(p) {
+  if (p.weaponType === 'bow') {
+    if (p.level >= 1) {
+      p.fastShot = true;
+      spawnParticles(p.x, p.y, '#7fc8ff', 12, 4);
+    }
+    if (p.level >= 2) {
+      p.multishot = true;
+      spawnParticles(p.x, p.y, '#ffdd66', 14, 4);
+    }
+  } else {
+    if (p.level >= 1) {
+      p.maxHp = p.maxHp * 2;
+      p.hp = p.maxHp;
+      p.size = p.baseSize * 1.15;
+      spawnParticles(p.x, p.y, '#ff6688', 12, 4);
+    }
+    if (p.level >= 2) {
+      p.areaHit = true;
+      p.size = p.baseSize * 1.3;
+      spawnParticles(p.x, p.y, '#ffdd66', 14, 4);
+    }
   }
 }
 
@@ -694,6 +846,122 @@ function updateGoliathAI(mob, target, distance, dt, alivePawns) {
     }
   } else {
     steerMob(mob, mobGoal(mob, target), 0.7);
+  }
+}
+
+function updateAshdrakeAI(mob, target, dt) {
+  mob.meteorCooldown -= dt;
+
+  if (mob.meteorCooldown <= 0 && pawns.length > 0) {
+    mob.meteorCooldown = mob.meteorInterval;
+    const alive = pawns.filter(ph => ph.hp > 0);
+    const dropCount = Math.min(4, Math.max(2, Math.floor(pawns.length / 3)));
+    for (let i = 0; i < dropCount; i++) {
+      const p = alive.length ? alive[Math.floor(Math.random() * alive.length)] : { x: Math.random() * W, y: Math.random() * H };
+      meteors.push({
+        x: p.x + (Math.random() - 0.5) * 140,
+        y: -60,
+        targetY: p.y + Math.random() * 60,
+        vx: (Math.random() - 0.5) * 2,
+        vy: 9 + Math.random() * 3,
+        damage: 25,
+        radius: 70,
+        flash: 0,
+      });
+    }
+  }
+
+  if (mob.jumpState === 'idle') {
+    mob.jumpCooldown -= dt;
+    if (mob.jumpCooldown <= 0) {
+      mob.jumpState = 'windup';
+      mob.jumpWindup = 35;
+      mob.jumpTarget = target && target.hp > 0 ? target : null;
+      mob.shadowAlpha = 0.2;
+    }
+  } else if (mob.jumpState === 'windup') {
+    mob.jumpWindup -= dt;
+    mob.shadowAlpha = 0.2 + (1 - mob.jumpWindup / 35) * 0.6;
+    if (mob.jumpWindup <= 0) {
+      mob.jumpState = 'leaping';
+      mob.jumpStart = { x: mob.x, y: mob.y };
+      mob.jumpProgress = 0;
+      mob.jumpEnd = mob.jumpTarget
+        ? { x: mob.jumpTarget.x, y: mob.jumpTarget.y }
+        : { x: mob.x, y: mob.y };
+      mob.visible = false;
+    }
+  } else if (mob.jumpState === 'leaping') {
+    mob.jumpProgress += dt;
+    const prog = Math.min(1, mob.jumpProgress / mob.jumpDuration);
+    const sx = mob.jumpStart.x, sy = mob.jumpStart.y;
+    const ex = mob.jumpEnd.x, ey = mob.jumpEnd.y;
+    const height = 220;
+    mob.x = lerp(sx, ex, prog);
+    mob.y = lerp(sy, ey, prog) - Math.sin(prog * Math.PI) * height;
+    mob.x = Math.max(mob.size / 2, Math.min(W - mob.size / 2, mob.x));
+    mob.y = Math.max(mob.size / 2, Math.min(H - mob.size / 2, mob.y));
+
+    if (prog > 0.15) mob.shadowAlpha = 1;
+    if (prog >= 1) {
+      mob.x = ex; mob.y = ey;
+      mob.jumpState = 'idle';
+      mob.jumpCooldown = mob.jumpInterval;
+      mob.visible = true;
+      mob.shadowAlpha = 0;
+
+      spawnParticles(mob.x, mob.y, '#ff4400', 35, 7);
+      spawnParticles(mob.x, mob.y, '#888888', 15, 5);
+      const landRadius = 185;
+      for (let i = pawns.length - 1; i >= 0; i--) {
+        const p = pawns[i];
+        if (p.hp <= 0) continue;
+        const d = dist(mob, p);
+        if (d < landRadius) {
+          p.hp -= 50;
+          p.stunTimer = STUN_FRAMES;
+          p.flashTimer = 15;
+          spawnParticles(p.x, p.y, '#ff2200', 10, 5);
+          if (p.hp <= 0) {
+            spawnParticles(p.x, p.y, p.color, 20, 5);
+            pawns.splice(i, 1);
+          }
+        }
+      }
+    }
+  }
+}
+
+function updateMeteors(dt) {
+  for (let i = meteors.length - 1; i >= 0; i--) {
+    const mt = meteors[i];
+    mt.x += mt.vx * dt;
+    mt.y += mt.vy * dt;
+    mt.flash++;
+
+    if (mt.y >= mt.targetY) {
+      let exploded = false;
+      for (let j = pawns.length - 1; j >= 0; j--) {
+        const p = pawns[j];
+        if (p.hp <= 0) continue;
+        const d = Math.sqrt((p.x - mt.x) * (p.x - mt.x) + (p.y - mt.y) * (p.y - mt.y));
+        if (d < mt.radius + p.size * 0.5) {
+          exploded = true;
+          p.hp -= mt.damage;
+          p.flashTimer = 12;
+          spawnParticles(p.x, p.y, '#ff6600', 9, 5);
+          if (p.hp <= 0) {
+            spawnParticles(p.x, p.y, p.color, 20, 5);
+            pawns.splice(j, 1);
+          }
+        }
+      }
+      if (exploded || true) {
+        spawnParticles(mt.x, mt.y, '#ff4400', 18, 6);
+        spawnParticles(mt.x, mt.y, '#ffaa00', 12, 4);
+        meteors.splice(i, 1);
+      }
+    }
   }
 }
 
@@ -786,12 +1054,11 @@ function drawPawn(p) {
   const s = p.size;
   ctx.drawImage(pawnSprite, p.x - s / 2, p.y - s / 2, s, s);
 
-  ctx.globalAlpha = 1;
+  ctx.globalAlpha = 0.45;
+  ctx.globalCompositeOperation = 'source-atop';
   ctx.fillStyle = p.color;
-  ctx.globalAlpha = 0.15;
-  ctx.beginPath();
-  ctx.arc(p.x, p.y, s / 2 + 3, 0, Math.PI * 2);
-  ctx.fill();
+  ctx.fillRect(p.x - s / 2, p.y - s / 2, s, s);
+  ctx.globalCompositeOperation = 'source-over';
   ctx.globalAlpha = 1;
 
   ctx.font = 'bold 13px Arial';
@@ -810,6 +1077,17 @@ function drawPawn(p) {
   ctx.fillRect(barX - 1, barY - 1, barW + 2, barH + 2);
   ctx.fillStyle = hpRatio > 0.6 ? '#00ff00' : hpRatio > 0.3 ? '#ffaa00' : '#ff0000';
   ctx.fillRect(barX, barY, barW * hpRatio, barH);
+
+  if (p.level > 0) {
+    const starsY = barY + barH + 6;
+    for (let i = 0; i < p.level; i++) {
+      const sx = p.x - (p.level - 1) * 6 + i * 12;
+      ctx.fillStyle = '#ffd700';
+      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+      ctx.lineWidth = 1.5;
+      drawStar(ctx, sx, starsY, 5, 5, 2.5);
+    }
+  }
 
   if (p.weaponType === 'bow') {
     ctx.save();
@@ -886,6 +1164,22 @@ function drawPawn(p) {
 
 function drawMob(m) {
   ctx.save();
+
+  if (m.type === 'ashdrake') {
+    if (m.shadowAlpha > 0) {
+      ctx.globalAlpha = m.shadowAlpha * 0.5;
+      ctx.fillStyle = '#000000';
+      ctx.beginPath();
+      ctx.ellipse(m.x, m.y, m.size * 0.5, m.size * 0.14, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    if (m.visible === false) {
+      ctx.restore();
+      return;
+    }
+  }
+
   if (m.flashTimer > 0 && Math.floor(m.flashTimer) % 2 === 0) ctx.globalAlpha = 0.5;
   if (m.stunTimer > 0) ctx.globalAlpha = 0.4;
 
@@ -898,7 +1192,8 @@ function drawMob(m) {
   ctx.globalAlpha = 1;
 
   const hpRatio = Math.max(0, m.hp / m.maxHp);
-  const barW = s * 1.2, barH = 4;
+  const barW = m.type === 'ashdrake' ? s * 1.6 : s * 1.2;
+  const barH = m.type === 'ashdrake' ? 8 : 4;
   const barX = m.x - barW / 2, barY = m.y + s / 2 + 4;
   ctx.fillStyle = '#333';
   ctx.fillRect(barX - 1, barY - 1, barW + 2, barH + 2);
@@ -915,6 +1210,52 @@ function drawMob(m) {
     ctx.fillStyle = '#ff6666';
     ctx.fillText('GOLIATH', m.x, m.y - s / 2 - 8);
   }
+
+  if (m.type === 'ashdrake') {
+    ctx.font = 'bold 22px Arial';
+    ctx.textAlign = 'center';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 6;
+    ctx.strokeStyle = 'rgba(0,0,0,0.9)';
+    ctx.strokeText('ASH DRAKE', m.x, m.y - s / 2 - 14);
+    ctx.fillStyle = '#ff8844';
+    ctx.fillText('ASH DRAKE', m.x, m.y - s / 2 - 14);
+  }
+
+  ctx.restore();
+}
+
+function drawMeteor(mt) {
+  ctx.save();
+  const hue = 24;
+
+  ctx.fillStyle = '#cc3300';
+  ctx.beginPath();
+  ctx.arc(mt.x, mt.y, 10, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = '#ff8822';
+  ctx.beginPath();
+  ctx.arc(mt.x, mt.y, 6, 0, Math.PI * 2);
+  ctx.fill();
+
+  if (Math.floor(mt.flash / 2) % 2 === 0) {
+    ctx.fillStyle = '#ffcc66';
+    ctx.beginPath();
+    ctx.arc(mt.x, mt.y, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.globalAlpha = 0.5;
+  ctx.fillStyle = '#ff5500';
+  ctx.beginPath();
+  ctx.ellipse(mt.x - mt.vx * 2, mt.y - mt.vy * 2, 12, 6, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.globalAlpha = 0.25;
+  ctx.beginPath();
+  ctx.ellipse(mt.x - mt.vx * 4, mt.y - mt.vy * 4, 20, 10, 0, 0, Math.PI * 2);
+  ctx.fill();
 
   ctx.restore();
 }
@@ -1145,12 +1486,14 @@ function gameLoop(timestamp) {
   updatePawns(dt);
   updateMobs(dt);
   updateArrows(dt);
+  updateMeteors(dt);
   updateParticles(dt);
   resolveCollisions();
 
   if (pawns.length === 0 && (mobs.length > 0 || wave > 0)) {
     mobs.length = 0;
     arrows.length = 0;
+    meteors.length = 0;
     particles.length = 0;
     wave = 0;
     waveActive = false;
@@ -1169,6 +1512,7 @@ function gameLoop(timestamp) {
   }
 
   for (const a of arrows) drawArrow(a);
+  for (const mt of meteors) drawMeteor(mt);
   for (const p of pawns) { drawPawn(p); drawSwordSlash(p); }
   for (const m of mobs) drawMob(m);
   drawParticles();
