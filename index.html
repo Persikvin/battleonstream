@@ -52,7 +52,7 @@ const DODGE_DISTANCE = 140;
 const ATTACK_DIST_BOW = 230;
 const BOW_RANGE = 300;
 const SWORD_DAMAGE = 15;
-const BOW_DAMAGE = 12;
+const BOW_DAMAGE = 45;
 const ARROW_SPEED = 7;
 const TENTACLE_RADIUS = 65;
 const TENTACLE_DELAY_FRAMES = 60;
@@ -173,6 +173,8 @@ function spawnPawnForViewer(name, message) {
   const existing = pawns.find(p => p.name.toLowerCase() === name.toLowerCase());
   if (existing) {
     existing.lastMessageTime = Date.now();
+    existing.chatText = message;
+    existing.chatBirth = Date.now();
     const cmd = wepFromMessage(message);
     if (cmd) setPawnWeapon(existing, cmd);
     existing.hp = Math.min(existing.hp + 10, existing.maxHp);
@@ -209,6 +211,8 @@ function spawnPawnForViewer(name, message) {
     attackAnim: 0,
     wavesSurvived: 0,
     level: 0,
+    chatText: message,
+    chatBirth: Date.now(),
   });
 }
 
@@ -1070,6 +1074,56 @@ function drawPawn(p) {
   ctx.strokeText(p.name, p.x, p.y - s / 2 - 12);
   ctx.fillStyle = '#ffffff';
   ctx.fillText(p.name, p.x, p.y - s / 2 - 12);
+
+  if (p.chatText && p.chatBirth) {
+    const age = Date.now() - p.chatBirth;
+    const dur = 3500 + (p.chatText.length || 0) * 30;
+    if (age < dur) {
+      const remaining = dur - age;
+      const alpha = remaining < 600 ? remaining / 600 : 1;
+      if (alpha > 0) {
+        const txt = p.chatText.length > 40 ? p.chatText.substring(0, 40) + '…' : p.chatText;
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.font = '11px Arial';
+        ctx.textAlign = 'center';
+        const tw = ctx.measureText(txt).width;
+        const padX = 8, padY = 5, bh = 20, rad = 8;
+        const bw = tw + padX * 2;
+        const y0 = p.y - s / 2 - 34;
+        const bx = p.x - bw / 2;
+
+        ctx.fillStyle = 'rgba(30,30,40,0.9)';
+        ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(bx + rad, y0 - bh);
+        ctx.lineTo(bx + bw - rad, y0 - bh);
+        ctx.quadraticCurveTo(bx + bw, y0 - bh, bx + bw, y0 - bh + rad);
+        ctx.lineTo(bx + bw, y0 - rad);
+        ctx.quadraticCurveTo(bx + bw, y0, bx + bw - rad, y0);
+        ctx.lineTo(bx + rad, y0);
+        ctx.quadraticCurveTo(bx, y0, bx, y0 - rad);
+        ctx.lineTo(bx, y0 - bh + rad);
+        ctx.quadraticCurveTo(bx, y0 - bh, bx + rad, y0 - bh);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(p.x - 5, y0);
+        ctx.lineTo(p.x + 5, y0);
+        ctx.lineTo(p.x, y0 + 7);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#ffe088';
+        ctx.fillText(txt, p.x, y0 - padY);
+        ctx.restore();
+      }
+    }
+  }
 
   const hpRatio = Math.max(0, p.hp / p.maxHp);
   const barW = HP_BAR_WIDTH, barH = HP_BAR_HEIGHT;
