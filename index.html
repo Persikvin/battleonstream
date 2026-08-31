@@ -52,7 +52,7 @@ const DODGE_DISTANCE = 140;
 const ATTACK_DIST_BOW = 230;
 const BOW_RANGE = 300;
 const SWORD_DAMAGE = 15;
-const BOW_DAMAGE = 45;
+const BOW_DAMAGE = 30;
 const ARROW_SPEED = 7;
 const TENTACLE_RADIUS = 65;
 const TENTACLE_DELAY_FRAMES = 60;
@@ -320,7 +320,8 @@ function spawnWave() {
     return;
   }
 
-  const totalMobs = Math.min(Math.max(4, friendlyCount + (1 + Math.floor(Math.random() * 3))), MAX_MOBS_PER_WAVE);
+  const extra = friendlyCount > 5 ? (3 + Math.floor(Math.random() * 3)) : (1 + Math.floor(Math.random() * 3));
+  const totalMobs = Math.min(Math.max(4, friendlyCount + extra), MAX_MOBS_PER_WAVE);
 
   let goliathCount = 0;
   if (wave >= 4) {
@@ -374,7 +375,7 @@ function spawnMinivulp() {
 
 function spawnGoliath() {
   const pos = spawnFromEdge(80);
-  const hp = 150 + wave * 30;
+  const hp = 100 + wave * 15;
   mobs.push({
     type: 'goliath',
     x: pos.x, y: pos.y,
@@ -400,7 +401,7 @@ function spawnGoliath() {
 }
 
 function spawnAshdrake() {
-  const hp = Math.max(900, 600 + pawns.length * 40);
+  const hp = Math.max(1800, (600 + pawns.length * 40) * 2);
   mobs.push({
     type: 'ashdrake',
     x: W / 2, y: H / 2,
