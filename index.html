@@ -58,6 +58,7 @@ const TENTACLE_RADIUS = 65;
 const TENTACLE_DELAY_FRAMES = 60;
 const TENTACLE_STRIKE_FRAMES = 34;
 const STUN_FRAMES = 60;
+const COLLIDE_SCALE = 0.62;
 
 const PAWN_COLORS = [
   '#FF6B6B','#4ECDC4','#45B7D1','#96CEB4','#FFEAA7',
@@ -260,8 +261,14 @@ function showWaveText(text) {
 
 function spawnWave() {
   wave++;
-  const minivulpCount = Math.min(3 + wave * 2, MAX_MOBS_PER_WAVE);
-  const goliathCount = wave >= 3 ? Math.floor(wave / 3) : 0;
+  const friendlyCount = pawns.length;
+
+  const totalMobs = Math.min(Math.max(4, friendlyCount + (1 + Math.floor(Math.random() * 3))), MAX_MOBS_PER_WAVE);
+  let goliathCount = wave >= 3 ? Math.floor(wave / 3) : 0;
+  if (goliathCount > totalMobs) goliathCount = totalMobs - 1;
+  if (goliathCount < 0) goliathCount = 0;
+  const minivulpCount = totalMobs - goliathCount;
+
   showWaveText('Wave ' + wave);
   for (let i = 0; i < minivulpCount; i++) spawnMinivulp();
   for (let i = 0; i < goliathCount; i++) spawnGoliath();
@@ -290,7 +297,7 @@ function spawnMinivulp() {
     speed: 1.8 + Math.random() * 0.5 + wave * 0.1,
     target: null,
     attackCooldown: 0,
-    attackRange: PAWN_SIZE + MOB_SIZE_BASE,
+    attackRange: (PAWN_SIZE + MOB_SIZE_BASE) * COLLIDE_SCALE,
     attackDamage: 8 + wave,
     attackInterval: 55,
     sprite: minivulpSprite,
@@ -313,7 +320,7 @@ function spawnGoliath() {
     speed: 1.2 + wave * 0.05,
     target: null,
     attackCooldown: 0,
-    attackRange: PAWN_SIZE + 58,
+    attackRange: (PAWN_SIZE + 58) * COLLIDE_SCALE,
     attackDamage: 20 + wave * 2,
     attackInterval: 80,
     sprite: goliathSprite,
@@ -332,7 +339,7 @@ function resolveCollisions() {
       const a = pawns[i], b = pawns[j];
       const dx = b.x - a.x, dy = b.y - a.y;
       const d = Math.sqrt(dx * dx + dy * dy);
-      const minD = a.size + b.size;
+      const minD = (a.size + b.size) * COLLIDE_SCALE;
       if (d < minD && d > 0.001) {
         const overlap = (minD - d) / 2;
         const nx = dx / d, ny = dy / d;
@@ -349,7 +356,7 @@ function resolveCollisions() {
       if (m.hp <= 0) continue;
       const dx = m.x - p.x, dy = m.y - p.y;
       const d = Math.sqrt(dx * dx + dy * dy);
-      const minD = p.size + m.size;
+      const minD = (p.size + m.size) * COLLIDE_SCALE;
       if (d < minD && d > 0.001) {
         const overlap = minD - d;
         const nx = dx / d, ny = dy / d;
@@ -369,7 +376,7 @@ function resolveCollisions() {
       if (a.hp <= 0 || b.hp <= 0) continue;
       const dx = b.x - a.x, dy = b.y - a.y;
       const d = Math.sqrt(dx * dx + dy * dy);
-      const minD = a.size + b.size;
+      const minD = (a.size + b.size) * COLLIDE_SCALE;
       if (d < minD && d > 0.001) {
         const overlap = (minD - d) / 2;
         const nx = dx / d, ny = dy / d;
@@ -430,7 +437,7 @@ function updatePawns(dt) {
     }
 
     const atkDist = nearestMob
-      ? (p.weaponType === 'bow' ? ATTACK_DIST_BOW : (p.size + nearestMob.size + 8))
+      ? (p.weaponType === 'bow' ? ATTACK_DIST_BOW : ((p.size + nearestMob.size) * COLLIDE_SCALE) + 8)
       : Infinity;
 
     if (nearestMob && nearestDist < atkDist && p.attackCooldown <= 0) {
@@ -440,7 +447,7 @@ function updatePawns(dt) {
       p.state = 'chase';
       const dir = angleTo(p, nearestMob);
       const isBow = p.weaponType === 'bow';
-      const desire = isBow ? ATTACK_DIST_BOW * 0.9 : (p.size + nearestMob.size + 12);
+      const desire = isBow ? ATTACK_DIST_BOW * 0.9 : ((p.size + nearestMob.size) * COLLIDE_SCALE) + 12;
 
       if (isBow) {
         if (nearestDist < desire) {
@@ -511,7 +518,7 @@ function performPawnAttack(pawn, mob) {
       life: BOW_RANGE,
     });
   } else {
-    if (dist(pawn, mob) < pawn.size + mob.size + 8) {
+    if (dist(pawn, mob) < ((pawn.size + mob.size) * COLLIDE_SCALE) + 8) {
       mob.hp -= SWORD_DAMAGE;
       mob.flashTimer = 8;
       mob.hitAnim = 10;
@@ -1014,24 +1021,52 @@ function drawArrow(a) {
 function drawSwordSlash(p) {
   if (p.attackAnim <= 0 || p.weaponType !== 'sword') return;
   ctx.save();
-  const prog = 1 - p.attackAnim / 18;
+  const total = 18;
+  const prog = 1 - p.attackAnim / total;
   const a = p.angle;
-  const r = p.size * 1.3;
+  const reach = p.size + 26;
+  const ease = prog * prog * (3 - 2 * prog);
 
-  ctx.globalAlpha = 0.6 * (1 - prog);
-  ctx.strokeStyle = '#ffffff';
-  ctx.lineWidth = 3;
+  const startA = a - Math.PI * 0.75;
+  const endA = a + Math.PI * 0.25;
+  const curA = startA + (endA - startA) * ease;
+  const arcSpan = Math.PI * 0.9;
+  const a0 = curA - arcSpan;
+  const a1 = curA;
+
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+
+  ctx.globalAlpha = 0.9 * (1 - prog * 0.5);
+  ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+  ctx.lineWidth = 5;
   ctx.beginPath();
-  ctx.arc(p.x, p.y, r * (0.4 + prog * 0.6), a - Math.PI / 3, a + Math.PI / 3);
+  ctx.arc(p.x, p.y, reach, a0, a1);
   ctx.stroke();
 
-  ctx.globalAlpha = 0.25 * (1 - prog);
+  ctx.globalAlpha = 0.35 * (1 - prog * 0.6);
   ctx.fillStyle = '#ffffff';
   ctx.beginPath();
   ctx.moveTo(p.x, p.y);
-  ctx.arc(p.x, p.y, r * (0.4 + prog * 0.6), a - Math.PI / 3, a + Math.PI / 3);
+  ctx.arc(p.x, p.y, reach, a0, a1);
   ctx.closePath();
   ctx.fill();
+
+  ctx.globalAlpha = 0.8 * (1 - prog);
+  ctx.strokeStyle = 'rgba(255,255,120,0.9)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, reach - 4, a0 + 0.2, a1 - 0.1);
+  ctx.stroke();
+
+  const tipX = p.x + Math.cos(a1) * (reach + 4);
+  const tipY = p.y + Math.sin(a1) * (reach + 4);
+  ctx.globalAlpha = Math.max(0, 1 - prog * 1.4);
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(tipX, tipY, 3.5, 0, Math.PI * 2);
+  ctx.fill();
+
   ctx.restore();
 }
 
