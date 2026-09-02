@@ -44,8 +44,8 @@ const MOB_FRICTION = 0.988;
 const ACCEL = 0.34;
 const MOB_ACCEL = 0.28;
 const MAX_SPEED = 4.5;
-const PAWN_SIZE = 52;
-const MOB_SIZE_BASE = 42;
+const PAWN_SIZE = 78;
+const MOB_SIZE_BASE = 63;
 const HP_BAR_WIDTH = 44;
 const HP_BAR_HEIGHT = 5;
 const DODGE_DISTANCE = 140;
@@ -381,11 +381,11 @@ function spawnGoliath() {
     x: pos.x, y: pos.y,
     vx: 0, vy: 0,
     hp, maxHp: hp,
-    size: 58,
+    size: 87,
     speed: 1.2 + wave * 0.05,
     target: null,
     attackCooldown: 0,
-    attackRange: (PAWN_SIZE + 58) * COLLIDE_SCALE,
+    attackRange: (PAWN_SIZE + 87) * COLLIDE_SCALE,
     attackDamage: 20 + wave * 2,
     attackInterval: 80,
     sprite: goliathSprite,
@@ -407,7 +407,7 @@ function spawnAshdrake() {
     x: W / 2, y: H / 2,
     vx: 0, vy: 0,
     hp, maxHp: hp,
-    size: 130,
+    size: 195,
     speed: 0,
     target: null,
     attackCooldown: 0,
